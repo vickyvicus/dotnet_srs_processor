@@ -1,0 +1,23 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: srs-processor
+  namespace: dotnet-webjobs
+spec:
+  schedule: "*/15 * * * *"
+  failedJobsHistoryLimit: 2
+  successfulJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: srs-processor-job
+        spec:
+          containers:
+            - name: srs-processor-pod
+              image: fadmsprod.azurecr.io/srs_processor:latest
+              envFrom:
+                - secretRef:
+                    name: srs-processor
+          restartPolicy: OnFailure

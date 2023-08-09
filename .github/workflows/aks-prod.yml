@@ -1,0 +1,100 @@
+name: Deploy to AKS PROD Env
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+  
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+    env:
+      DOTNET_INSTALL_DIR: "./.dotnet"
+    steps:
+    - uses: actions/checkout@master
+
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v3
+      with:
+        # Semantic version range syntax or exact version of a dotnet version
+        dotnet-version: '7.0.x'
+        
+    - name: Install dependencies
+      run: dotnet restore
+
+    - name: Check code formatting
+      run: dotnet format --verify-no-changes
+
+    - name: Run tests
+      run: dotnet test --filter TestCategory=main
+    
+    - uses: azure/docker-login@v1
+      with:
+        login-server: fadmsprod.azurecr.io
+        username: ${{ secrets.acr_fadmsprod_username }}
+        password: ${{ secrets.acr_fadmsprod_password }}
+    
+    - name: Build and push image to ACR
+      id: build-image
+      run: |
+        docker build "$GITHUB_WORKSPACE" -f  "SRS.Processor/Dockerfile" -t fadmsdebug.azurecr.io/srs_processor:${{ github.sha }} --label dockerfile-path=SRS.Processor/Dockerfile
+        docker push fadmsdebug.azurecr.io/srs_processor:${{ github.sha }}
+
+    - uses: azure/setup-kubectl@v3
+      id: install
+      
+    - uses: azure/k8s-set-context@v1
+      with:
+         kubeconfig: ${{ secrets.aks_dmsprod_kubeConfig }}
+      id: login
+
+    - name: Create cluster secret for azure k8s
+      uses: azure/k8s-create-secret@v1
+      with:
+        namespace: dotnet-webjobs
+        container-registry-url: fadmsprod.azurecr.io
+        container-registry-username: ${{ secrets.acr_fadmsprod_username }}
+        container-registry-password: ${{ secrets.acr_fadmsprod_password }}
+        secret-name: dmsclusterprdockerauth
+        
+    - uses: azure/k8s-deploy@v1.2
+      with:
+        namespace: dotnet-webjobs
+        manifests: |
+          deployment/k8s/prod/deployment.yml
+        images: |
+          fadmsprod.azurecr.io/srs_processor:${{ github.sha }}
+        imagepullsecrets: |
+          dmsclusterprdockerauth
+
+    - name: "Extract changelog"
+      id: extract-changelog
+      uses: TheDotLabs/extract-release-notes@main
+          
+    - name: "Send Notification on DMS Telegram Group"
+      uses: appleboy/telegram-action@master
+      with:
+        to: ${{ secrets.iris_telegram_group_id }}
+        token: ${{ secrets.iris_telegram_token }}
+        message: |
+          ✅ FA DMS - SRS Processor Published ${{ github.ref_name }}
+          Trigger by: @${{ github.actor }}
+
+          ${{ steps.extract-changelog.outputs.release_notes }}
+
+          #dms_srs_processor_release #dms_release
+
+    - name: "Send Notification on Telegram Group on Failure"
+      if: failure()
+      uses: appleboy/telegram-action@master
+      with:
+        to: ${{ secrets.iris_telegram_group_id }}
+        token: ${{ secrets.iris_telegram_token }}
+        message: |
+          ❌ FA DMS - SRS Processor Publishing Failed ${{ github.ref_name }}
+          Trigger by: @${{ github.actor }}
+          #dms_srs_processor_release #dms_release
+

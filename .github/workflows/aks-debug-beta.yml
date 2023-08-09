@@ -1,0 +1,89 @@
+name: Deploy to AKS Debug Env
+on:
+  push:
+    branches: [develop]
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+  
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+    env:
+      DOTNET_INSTALL_DIR: "./.dotnet"
+    steps:
+    - uses: actions/checkout@master
+      
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v3
+      with:
+        # Semantic version range syntax or exact version of a dotnet version
+        dotnet-version: '7.0.x'
+
+    - name: Install dependencies
+      run: dotnet restore
+
+    - name: Check code formatting
+      run: dotnet format --verify-no-changes
+      
+    - name: Run tests
+      run: dotnet test --filter TestCategory=main
+    
+    - uses: azure/docker-login@v1
+      with:
+        login-server: fadmsdebug.azurecr.io
+        username: ${{ secrets.acr_fadmsdebug_username }}
+        password: ${{ secrets.acr_fadmsdebug_password }}
+    
+    - name: Build and push image to ACR
+      id: build-image
+      run: |
+        docker build "$GITHUB_WORKSPACE" -f  "SRS.Processor/Dockerfile" -t fadmsdebug.azurecr.io/srs_processor:${{ github.sha }} --label dockerfile-path=SRS.Processor/Dockerfile
+        docker push fadmsdebug.azurecr.io/srs_processor:${{ github.sha }}
+
+    - uses: azure/setup-kubectl@v3
+      id: install
+      
+    - uses: azure/k8s-set-context@v1
+      with:
+         kubeconfig: ${{ secrets.aks_dmsdebug_kubeConfig }}
+      id: login
+    
+    - name: Create cluster secret for azure k8s for develop
+      uses: azure/k8s-create-secret@v1
+      with:
+        namespace: dotnet-webjobs
+        container-registry-url: fadmsdebug.azurecr.io
+        container-registry-username: ${{ secrets.acr_fadmsdebug_username }}
+        container-registry-password: ${{ secrets.acr_fadmsdebug_password }}
+        secret-name: dmsdebugdockerauth
+
+    - name: Create cluster secret for azure k8s for beta
+      uses: azure/k8s-create-secret@v1
+      with:
+        namespace: dotnet-webjobs-beta
+        container-registry-url: fadmsdebug.azurecr.io
+        container-registry-username: ${{ secrets.acr_fadmsdebug_username }}
+        container-registry-password: ${{ secrets.acr_fadmsdebug_password }}
+        secret-name: dmsdebugdockerauth      
+       
+    - uses: azure/k8s-deploy@v1.2
+      with:
+        namespace: dotnet-webjobs
+        manifests: |
+          deployment/k8s/debug/deployment.yml
+        images: |
+          fadmsdebug.azurecr.io/srs_processor:${{ github.sha }}
+        imagepullsecrets: |
+          dmsdebugdockerauth
+
+    - uses: azure/k8s-deploy@v1.2
+      with:
+        namespace: dotnet-webjobs-beta
+        manifests: |
+          deployment/k8s/beta/deployment.yml
+        images: |
+          fadmsdebug.azurecr.io/srs_processor:${{ github.sha }}
+        imagepullsecrets: |
+          dmsdebugdockerauth
